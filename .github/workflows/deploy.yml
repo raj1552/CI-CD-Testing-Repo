@@ -41,27 +41,6 @@ jobs:
 
       - name: Start Instance Refresh
         run: |
-          if [ -n "$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name nextjs-asg --query 'InstanceRefreshes[?Status==`InProgress` || Status==`Pending`].InstanceRefreshId' --output text)" ]; then
-            echo "Instance refresh already in progress, skipping."
-          else
             aws autoscaling start-instance-refresh \
             --auto-scaling-group-name nextjs-asg \
-            --preferences '{
-              "MinHealthyPercentage": 100,
-              "InstanceWarmup": 120
-            }'
-            echo "Waiting for instance refresh to complete..."
-            while true; do
-              status=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name nextjs-asg --query 'InstanceRefreshes[0].Status' --output text)
-              if [ "$status" = "Successful" ]; then
-                echo "Instance refresh completed successfully."
-                break
-              elif [ "$status" = "Failed" ]; then
-                echo "Instance refresh failed."
-                exit 1
-              else
-                echo "Current status: $status. Waiting..."
-                sleep 30
-              fi
-            done
-          fi
+            --preferences MinHealthyPercentage=100,InstanceWarmup=120
