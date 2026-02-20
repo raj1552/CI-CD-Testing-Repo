@@ -41,9 +41,13 @@ jobs:
 
       - name: Start Instance Refresh
         run: |
-          aws autoscaling start-instance-refresh \
-          --auto-scaling-group-name nextjs-asg \
-          --preferences '{
-            "MinHealthyPercentage": 100,
-            "InstanceWarmup": 120
-          }'
+          if [ -n "$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name nextjs-asg --query 'InstanceRefreshes[?Status==`InProgress` || Status==`Pending`].InstanceRefreshId' --output text)" ]; then
+            echo "Instance refresh already in progress, skipping."
+          else
+            aws autoscaling start-instance-refresh \
+            --auto-scaling-group-name nextjs-asg \
+            --preferences '{
+              "MinHealthyPercentage": 100,
+              "InstanceWarmup": 120
+            }'
+          fi
