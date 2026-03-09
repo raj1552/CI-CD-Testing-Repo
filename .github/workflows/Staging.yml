@@ -1,0 +1,174 @@
+name: Build & Push Image to GHCR
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  version:
+    name: Determine Next Version
+    runs-on: ubuntu-latest
+    outputs:
+      new_version: ${{ steps.semver.outputs.new_version }}
+      sha_tag: ${{ steps.semver.outputs.sha_tag }}
+      branch_tag: ${{ steps.semver.outputs.branch_tag }}
+      bump_type: ${{ steps.semver.outputs.bump_type }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed to read all commits + tags
+
+      - name: Determine version bump and next version
+        id: semver
+        run: |
+          # ── 1. Find the latest semver tag (default to v0.0.0) ────────────────
+          LATEST_TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -n 1)
+          if [[ -z "$LATEST_TAG" ]]; then
+            LATEST_TAG="v0.0.0"
+          fi
+          echo "Latest tag: $LATEST_TAG"
+
+          # ── 2. Strip the 'v' and split into parts ────────────────────────────
+          VERSION="${LATEST_TAG#v}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          # ── 3. Get commits since last tag ─────────────────────────────────────
+          if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
+            COMMITS=$(git log "$LATEST_TAG"..HEAD --pretty=format:"%s")
+          else
+            COMMITS=$(git log --pretty=format:"%s")
+          fi
+
+          echo "Commits since $LATEST_TAG:"
+          echo "$COMMITS"
+
+          # ── 4. Detect bump type ───────────────────────────────────────────────
+          #
+          #  MAJOR  feat!:  fix!:  refactor!:  (any type with !)
+          #         or "BREAKING CHANGE" anywhere in the message
+          #
+          #  MINOR  feat:  feat(scope):
+          #
+          #  PATCH  Everything else — fix:, refactor:, chore:, plain English,
+          #         no prefix, merge commits, etc.
+          #
+          BUMP="patch"  # safe default — plain English always lands here
+
+          while IFS= read -r msg; do
+
+            # ── MAJOR ─────────────────────────────────────────────────────────
+            if echo "$msg" | grep -qiE '^[a-z]+(\(.+\))?!:' || \
+               echo "$msg" | grep -q 'BREAKING CHANGE'; then
+              BUMP="major"
+              break
+            fi
+
+            # ── MINOR ─────────────────────────────────────────────────────────
+            if [[ "$BUMP" != "major" ]] && echo "$msg" | grep -qiE '^feat(\(.+\))?:'; then
+              BUMP="minor"
+            fi
+
+            # ── PATCH ─────────────────────────────────────────────────────────
+            # Default — no action needed
+
+          done <<< "$COMMITS"
+
+          echo "Bump type: $BUMP"
+
+          # ── 5. Calculate new version ──────────────────────────────────────────
+          if [[ "$BUMP" == "major" ]]; then
+            MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0
+          elif [[ "$BUMP" == "minor" ]]; then
+            MINOR=$((MINOR + 1)); PATCH=0
+          else
+            PATCH=$((PATCH + 1))
+          fi
+
+          NEW_VERSION="v${MAJOR}.${MINOR}.${PATCH}"
+          SHA_TAG="sha-${GITHUB_SHA::7}"
+
+          # ── 6. Set branch tag ─────────────────────────────────────────────────
+          if [[ "${GITHUB_REF_NAME}" == "staging" ]]; then
+            BRANCH_TAG="staging"
+          elif [[ "${GITHUB_REF_NAME}" == "main" ]]; then
+            BRANCH_TAG="latest"
+          else
+            BRANCH_TAG="unknown"
+          fi
+
+          echo "New version : $NEW_VERSION"
+          echo "Bump type   : $BUMP"
+          echo "Branch tag  : $BRANCH_TAG"
+          echo "SHA tag     : $SHA_TAG"
+
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "sha_tag=$SHA_TAG"         >> $GITHUB_OUTPUT
+          echo "branch_tag=$BRANCH_TAG"   >> $GITHUB_OUTPUT
+          echo "bump_type=$BUMP"          >> $GITHUB_OUTPUT
+
+  build:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: version
+
+    permissions:
+      contents: write  
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build Docker image
+        run: |
+          echo "Version : ${{ needs.version.outputs.new_version }}"
+          echo "Bump    : ${{ needs.version.outputs.bump_type }}"
+          docker build \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.new_version }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.branch_tag }} \
+            -t ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.sha_tag }} \
+            .
+
+      - name: Push all Docker tags
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.new_version }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.branch_tag }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.sha_tag }}
+
+      - name: Create and push Git tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ needs.version.outputs.new_version }}
+          git push origin ${{ needs.version.outputs.new_version }}
+
+  # deploy:
+  #   name: Deploy on VPS
+  #   runs-on: [self-hosted, linux, backend]
+  #   needs: build
+  #   if: github.ref_name == 'staging'
+  #
+  #   steps:
+  #     - name: Checkout code
+  #       uses: actions/checkout@v4
+  #
+  #     - name: Deploy latest image
+  #       working-directory: /home/sandysh/apps/nobigo-admin-backend
+  #       run: make update
