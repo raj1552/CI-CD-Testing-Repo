@@ -46,7 +46,7 @@ jobs:
           if git rev-parse "$LATEST_TAG" >/dev/null 2>&1; then
             COMMITS=$(git log "$LATEST_TAG"..HEAD --pretty=format:"%s")
           else
-            COMMITS=$(git log --pretty=format:"%s")
+            COMMITS=$(git log -1 --pretty=format:"%s")
           fi
 
           echo "Commits since $LATEST_TAG:"
